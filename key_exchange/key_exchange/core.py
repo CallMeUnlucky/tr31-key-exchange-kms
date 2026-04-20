@@ -5,6 +5,11 @@ from cryptography.hazmat.primitives import cmac
 from cryptography.hazmat.primitives.ciphers import algorithms
 from cryptography.hazmat.backends import default_backend
 
+try:
+    import psec
+except ImportError:
+    psec = None
+
 
 class SecurityError(Exception):
     """Raised when a security check fails."""
@@ -103,6 +108,85 @@ def validate_kck_kcv(kek: bytes, expected_kcv: str) -> None:
         raise SecurityError("KCV validation failed: computed KCV does not match expected KCV")
 
 
+def compute_kcv(key: bytes) -> str:
+    """
+    Compute KCV (Key Check Value) using AES-CMAC.
+
+    Computes the CMAC of a 16-byte zero block and returns the first 3 bytes
+    as uppercase hexadecimal.
+
+    Args:
+        key: The key (any AES key size in bytes)
+
+    Returns:
+        KCV as 6-character uppercase hex string
+
+    Raises:
+        ValidationError: If key is invalid
+    """
+    if not isinstance(key, bytes):
+        raise ValidationError("Key must be bytes")
+
+    if len(key) not in (16, 24, 32):
+        raise ValidationError(f"Key must be 16, 24, or 32 bytes, got {len(key)}")
+
+    zero_block = b'\x00' * 16
+    c = cmac.CMAC(algorithms.AES(key), backend=default_backend())
+    c.update(zero_block)
+    cmac_result = c.finalize()
+
+    return cmac_result[:3].hex().upper()
+
+
+def unwrap_bdk(tr31_block: str, kek: bytes) -> bytes:
+    """
+    Unwrap BDK (Base Derivation Key) from TR-31 keyblock.
+
+    Uses the psec library to parse and unwrap the TR-31 keyblock using the
+    provided KEK.
+
+    Args:
+        tr31_block: TR-31 keyblock as hex string
+        kek: Key Encryption Key (32 bytes) to unwrap the BDK
+
+    Returns:
+        Unwrapped BDK as bytes
+
+    Raises:
+        ValidationError: If TR-31 format is invalid or KEK is invalid
+        SecurityError: If unwrapping fails (integrity check, etc.)
+    """
+    if not psec:
+        raise SecurityError("psec library not available. Install: pip install psec")
+
+    if not isinstance(kek, bytes):
+        raise ValidationError("KEK must be bytes")
+
+    if len(kek) != 32:
+        raise ValidationError(f"KEK must be 32 bytes, got {len(kek)}")
+
+    if not tr31_block or not isinstance(tr31_block, str):
+        raise ValidationError("TR-31 block must be a non-empty string")
+
+    try:
+        tr31_bytes = bytes.fromhex(tr31_block)
+    except ValueError as e:
+        raise ValidationError(f"Invalid hexadecimal format in TR-31 block: {str(e)}")
+
+    try:
+        tr31 = psec.TR31(tr31_bytes)
+        bdk = tr31.decrypt_key_block(kek)
+        return bdk
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "mac" in error_msg or "integrity" in error_msg or "auth" in error_msg:
+            raise SecurityError(f"TR-31 unwrap failed: integrity check or authentication failed")
+        elif "format" in error_msg or "parse" in error_msg:
+            raise ValidationError(f"TR-31 unwrap failed: invalid TR-31 format or structure")
+        else:
+            raise SecurityError(f"TR-31 unwrap failed: {str(e)}")
+
+
 class KeyExchange:
     """Handle cryptographic key exchange operations."""
 
@@ -137,3 +221,34 @@ class KeyExchange:
             ValidationError: If parameters are invalid
         """
         validate_kck_kcv(kek, expected_kcv)
+
+    @staticmethod
+    def compute_kcv(key: bytes) -> str:
+        """
+        Compute KCV (Key Check Value) using AES-CMAC.
+
+        Args:
+            key: The key (any AES key size in bytes)
+
+        Returns:
+            KCV as 6-character uppercase hex string
+        """
+        return compute_kcv(key)
+
+    @staticmethod
+    def unwrap_bdk(tr31_block: str, kek: bytes) -> bytes:
+        """
+        Unwrap BDK (Base Derivation Key) from TR-31 keyblock.
+
+        Args:
+            tr31_block: TR-31 keyblock as hex string
+            kek: Key Encryption Key (32 bytes) to unwrap the BDK
+
+        Returns:
+            Unwrapped BDK as bytes
+
+        Raises:
+            ValidationError: If TR-31 format is invalid or KEK is invalid
+            SecurityError: If unwrapping fails
+        """
+        return unwrap_bdk(tr31_block, kek)
