@@ -1,14 +1,20 @@
 """
 Core cryptographic logic for key exchange operations.
 """
+import os
 from cryptography.hazmat.primitives import cmac
-from cryptography.hazmat.primitives.ciphers import algorithms
+from cryptography.hazmat.primitives.ciphers import algorithms, Cipher, modes
 from cryptography.hazmat.backends import default_backend
 
 try:
     import psec
 except ImportError:
     psec = None
+
+try:
+    import dukpt as dukpt_lib
+except ImportError:
+    dukpt_lib = None
 
 
 class SecurityError(Exception):
@@ -187,6 +193,141 @@ def unwrap_bdk(tr31_block: str, kek: bytes) -> bytes:
             raise SecurityError(f"TR-31 unwrap failed: {str(e)}")
 
 
+def derive_dukpt_key_and_decrypt(
+    bdk: bytes,
+    ksn: str,
+    ciphertext_3des: bytes,
+) -> bytes:
+    """
+    Derive DUKPT working key and decrypt 3DES ECB ciphertext.
+
+    Uses the DUKPT algorithm to derive a working key from the BDK and KSN,
+    then decrypts the provided 3DES ECB ciphertext.
+
+    Args:
+        bdk: Base Derivation Key as bytes (8 or 16 bytes)
+        ksn: Key Serial Number as hex string (10 bytes = 20 hex chars)
+        ciphertext_3des: 3DES ECB encrypted data as bytes
+
+    Returns:
+        Decrypted plaintext as bytes
+
+    Raises:
+        ValidationError: If inputs are invalid
+        SecurityError: If DUKPT derivation or decryption fails
+    """
+    if not dukpt_lib:
+        raise SecurityError("dukpt library not available. Install: pip install dukpt")
+
+    if not isinstance(bdk, bytes):
+        raise ValidationError("BDK must be bytes")
+
+    if len(bdk) not in (8, 16):
+        raise ValidationError(f"BDK must be 8 or 16 bytes, got {len(bdk)}")
+
+    if not ksn or not isinstance(ksn, str):
+        raise ValidationError("KSN must be a non-empty string")
+
+    if len(ksn) != 20:
+        raise ValidationError(f"KSN must be 20 hex characters (10 bytes), got {len(ksn)}")
+
+    try:
+        ksn_bytes = bytes.fromhex(ksn)
+    except ValueError as e:
+        raise ValidationError(f"Invalid hexadecimal format in KSN: {str(e)}")
+
+    if not isinstance(ciphertext_3des, bytes):
+        raise ValidationError("Ciphertext must be bytes")
+
+    if len(ciphertext_3des) == 0:
+        raise ValidationError("Ciphertext cannot be empty")
+
+    if len(ciphertext_3des) % 8 != 0:
+        raise ValidationError(
+            f"3DES ciphertext must be multiple of 8 bytes, got {len(ciphertext_3des)}"
+        )
+
+    try:
+        working_key = dukpt_lib.derive(bdk, ksn_bytes)
+
+        cipher = Cipher(
+            algorithms.TripleDES(working_key),
+            modes.ECB(),
+            backend=default_backend(),
+        )
+        decryptor = cipher.decryptor()
+        plaintext = decryptor.update(ciphertext_3des) + decryptor.finalize()
+
+        return plaintext
+    except Exception as e:
+        error_msg = str(e).lower()
+        if "key" in error_msg or "invalid" in error_msg:
+            raise ValidationError(f"DUKPT derivation failed: invalid key or KSN format")
+        else:
+            raise SecurityError(f"DUKPT decryption failed: {str(e)}")
+
+
+def generate_and_export_pek(kek: bytes) -> tuple:
+    """
+    Generate a secure PEK and wrap it in a TR-31 keyblock.
+
+    Generates a random 16-byte PIN Encryption Key, wraps it using the provided
+    KEK in a TR-31 keyblock with proper PIN key headers, and computes the KCV.
+
+    Args:
+        kek: Key Encryption Key (32 bytes) to wrap the PEK
+
+    Returns:
+        Tuple of (tr31_keyblock_hex: str, pek_kcv: str)
+
+    Raises:
+        ValidationError: If KEK is invalid
+        SecurityError: If TR-31 wrapping or KCV computation fails
+    """
+    if not isinstance(kek, bytes):
+        raise ValidationError("KEK must be bytes")
+
+    if len(kek) != 32:
+        raise ValidationError(f"KEK must be 32 bytes, got {len(kek)}")
+
+    if not psec:
+        raise SecurityError("psec library not available. Install: pip install psec")
+
+    try:
+        pek = os.urandom(16)
+
+        pek_kcv = compute_kcv(pek)
+
+        try:
+            tr31 = psec.TR31(
+                key_data=pek,
+                key_usage="PE",
+                key_algorithm="TDES",
+                key_mode_of_use="E",
+                key_export_restrictions="N",
+                key_version_number="0",
+            )
+
+            keyblock_bytes = tr31.encrypt_key_block(kek)
+            tr31_keyblock_hex = keyblock_bytes.hex().upper()
+
+            return tr31_keyblock_hex, pek_kcv
+
+        except Exception as e:
+            error_msg = str(e).lower()
+            if "key" in error_msg or "format" in error_msg:
+                raise ValidationError(f"TR-31 keyblock generation failed: {str(e)}")
+            else:
+                raise SecurityError(f"TR-31 keyblock encryption failed: {str(e)}")
+
+    except SecurityError:
+        raise
+    except ValidationError:
+        raise
+    except Exception as e:
+        raise SecurityError(f"PEK generation and export failed: {str(e)}")
+
+
 class KeyExchange:
     """Handle cryptographic key exchange operations."""
 
@@ -252,3 +393,43 @@ class KeyExchange:
             SecurityError: If unwrapping fails
         """
         return unwrap_bdk(tr31_block, kek)
+
+    @staticmethod
+    def derive_dukpt_key_and_decrypt(
+        bdk: bytes,
+        ksn: str,
+        ciphertext_3des: bytes,
+    ) -> bytes:
+        """
+        Derive DUKPT working key and decrypt 3DES ECB ciphertext.
+
+        Args:
+            bdk: Base Derivation Key as bytes (8 or 16 bytes)
+            ksn: Key Serial Number as hex string (10 bytes = 20 hex chars)
+            ciphertext_3des: 3DES ECB encrypted data as bytes
+
+        Returns:
+            Decrypted plaintext as bytes
+
+        Raises:
+            ValidationError: If inputs are invalid
+            SecurityError: If DUKPT derivation or decryption fails
+        """
+        return derive_dukpt_key_and_decrypt(bdk, ksn, ciphertext_3des)
+
+    @staticmethod
+    def generate_and_export_pek(kek: bytes) -> tuple:
+        """
+        Generate a secure PEK and wrap it in a TR-31 keyblock.
+
+        Args:
+            kek: Key Encryption Key (32 bytes) to wrap the PEK
+
+        Returns:
+            Tuple of (tr31_keyblock_hex: str, pek_kcv: str)
+
+        Raises:
+            ValidationError: If KEK is invalid
+            SecurityError: If TR-31 wrapping or KCV computation fails
+        """
+        return generate_and_export_pek(kek)

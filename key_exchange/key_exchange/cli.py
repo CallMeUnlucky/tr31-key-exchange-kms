@@ -11,6 +11,8 @@ from key_exchange.core import (
     validate_kck_kcv,
     compute_kcv,
     unwrap_bdk,
+    derive_dukpt_key_and_decrypt,
+    generate_and_export_pek,
     ValidationError,
     SecurityError,
 )
@@ -49,8 +51,8 @@ def create_parser() -> argparse.ArgumentParser:
     )
     export_parser.add_argument(
         "--out",
-        default=None,
-        help="Output file path (reserved for future use)",
+        required=True,
+        help="Output file path for TR-31 keyblock",
         type=str,
     )
 
@@ -96,18 +98,19 @@ def handle_export_pek(
     kek_component_1: str,
     kek_component_2: str,
     kek_kcv: str,
-    out: Optional[str] = None,
+    out: str,
 ) -> int:
     """
     Handle the export-pek command.
 
-    Recombines KEK components using XOR and validates the KCV.
+    Recombines KEK components, generates a secure PEK, wraps it in TR-31,
+    and saves the keyblock to file.
 
     Args:
         kek_component_1: First KEK component (hex string)
         kek_component_2: Second KEK component (hex string)
         kek_kcv: Expected KCV for validation (hex string)
-        out: Output file path (reserved for future use)
+        out: Output file path for TR-31 keyblock
 
     Returns:
         Exit code (0 for success, 1 for failure)
@@ -116,9 +119,18 @@ def handle_export_pek(
         kek = recombine_kek(kek_component_1, kek_component_2)
         validate_kck_kcv(kek, kek_kcv)
 
-        print("SUCCESS: KEK validation passed. KCV is valid.")
-        if out:
-            print(f"NOTE: Output file parameter '{out}' is reserved for future use.")
+        tr31_keyblock_hex, pek_kcv = generate_and_export_pek(kek)
+
+        try:
+            with open(out, "w") as f:
+                f.write(tr31_keyblock_hex)
+        except IOError as e:
+            print(f"FILE ERROR: Failed to write keyblock to {out}: {str(e)}", file=sys.stderr)
+            return 1
+
+        print("SUCCESS: PEK generated and exported.")
+        print(f"PEK KCV: {pek_kcv}")
+        print(f"TR-31 keyblock saved to: {out}")
 
         return 0
 
