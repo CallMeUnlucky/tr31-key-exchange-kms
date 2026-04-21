@@ -7,9 +7,9 @@ from cryptography.hazmat.primitives.ciphers import algorithms, Cipher, modes
 from cryptography.hazmat.backends import default_backend
 
 try:
-    from psec.tr31 import KeyBlock
+    from psec import tr31 as tr31_module
 except ImportError:
-    KeyBlock = None
+    tr31_module = None
 
 try:
     import dukpt as dukpt_lib
@@ -149,10 +149,10 @@ def unwrap_bdk(tr31_block: str, kek: bytes) -> bytes:
     Unwrap BDK (Base Derivation Key) from TR-31 keyblock.
 
     Uses the psec library to parse and unwrap the TR-31 keyblock using the
-    provided KEK.
+    provided KEK. The tr31_block parameter must be a hex string.
 
     Args:
-        tr31_block: TR-31 keyblock as hex string
+        tr31_block: TR-31 keyblock as hex string (not converted to bytes)
         kek: Key Encryption Key (32 bytes) to unwrap the BDK
 
     Returns:
@@ -162,7 +162,7 @@ def unwrap_bdk(tr31_block: str, kek: bytes) -> bytes:
         ValidationError: If TR-31 format is invalid or KEK is invalid
         SecurityError: If unwrapping fails (integrity check, etc.)
     """
-    if not KeyBlock:
+    if not tr31_module:
         raise SecurityError("psec library not available. Install: pip install psec")
 
     if not isinstance(kek, bytes):
@@ -175,19 +175,13 @@ def unwrap_bdk(tr31_block: str, kek: bytes) -> bytes:
         raise ValidationError("TR-31 block must be a non-empty string")
 
     try:
-        tr31_bytes = bytes.fromhex(tr31_block)
-    except ValueError as e:
-        raise ValidationError(f"Invalid hexadecimal format in TR-31 block: {str(e)}")
-
-    try:
-        tr31 = KeyBlock(tr31_bytes)
-        bdk = tr31.unwrap(kek)
-        return bdk
+        header, bdk_bytes = tr31_module.unwrap(kek, tr31_block)
+        return bdk_bytes
     except Exception as e:
         error_msg = str(e).lower()
         if "mac" in error_msg or "integrity" in error_msg or "auth" in error_msg:
             raise SecurityError(f"TR-31 unwrap failed: integrity check or authentication failed")
-        elif "format" in error_msg or "parse" in error_msg:
+        elif "format" in error_msg or "parse" in error_msg or "invalid" in error_msg:
             raise ValidationError(f"TR-31 unwrap failed: invalid TR-31 format or structure")
         else:
             raise SecurityError(f"TR-31 unwrap failed: {str(e)}")
@@ -278,7 +272,8 @@ def generate_and_export_pek(kek: bytes) -> tuple:
         kek: Key Encryption Key (32 bytes) to wrap the PEK
 
     Returns:
-        Tuple of (tr31_keyblock_hex: str, pek_kcv: str)
+        Tuple of (tr31_keyblock_str: str, pek_kcv: str)
+        where tr31_keyblock_str is the hex-encoded TR-31 keyblock
 
     Raises:
         ValidationError: If KEK is invalid
@@ -290,28 +285,27 @@ def generate_and_export_pek(kek: bytes) -> tuple:
     if len(kek) != 32:
         raise ValidationError(f"KEK must be 32 bytes, got {len(kek)}")
 
-    if not KeyBlock:
+    if not tr31_module:
         raise SecurityError("psec library not available. Install: pip install psec")
 
     try:
         pek = os.urandom(16)
-
         pek_kcv = compute_kcv(pek)
 
         try:
-            # psec utiliza nombres de parámetros específicos del estándar
-            tr31 = KeyBlock(
-                key_data=pek,
-                key_usage="PE",                 # PIN Encryption
-                key_algorithm="T",              # 'T' es el código para Triple DES en TR-31
-                key_mode_of_use="E",            # Encryption/Decryption
-                exportability="N",              # Non-exportable
+            # 1. Creamos el objeto Header con las especificaciones
+            header = tr31_module.Header(
+                version_id="D",
+                key_usage="PE",
+                algorithm="T",
+                mode_of_use="E",
+                exportability="N",
             )
-
-            keyblock_bytes = tr31.wrap(kek)
-            tr31_keyblock_hex = keyblock_bytes.hex().upper()
-
-            return tr31_keyblock_hex, pek_kcv
+            
+            # 2. Envolvemos pasando la KEK, el Header y la PEK en ese orden exacto
+            tr31_keyblock_str = tr31_module.wrap(kek, header, pek)
+            
+            return tr31_keyblock_str, pek_kcv
 
         except Exception as e:
             error_msg = str(e).lower()
