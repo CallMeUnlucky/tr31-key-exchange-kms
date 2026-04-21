@@ -7,9 +7,9 @@ from cryptography.hazmat.primitives.ciphers import algorithms, Cipher, modes
 from cryptography.hazmat.backends import default_backend
 
 try:
-    from psec import tr31 as tr31_module
+    from psec.tr31 import KeyBlock
 except ImportError:
-    tr31_module = None
+    KeyBlock = None
 
 try:
     import dukpt as dukpt_lib
@@ -162,7 +162,7 @@ def unwrap_bdk(tr31_block: str, kek: bytes) -> bytes:
         ValidationError: If TR-31 format is invalid or KEK is invalid
         SecurityError: If unwrapping fails (integrity check, etc.)
     """
-    if not tr31_module:
+    if not KeyBlock:
         raise SecurityError("psec library not available. Install: pip install psec")
 
     if not isinstance(kek, bytes):
@@ -180,8 +180,8 @@ def unwrap_bdk(tr31_block: str, kek: bytes) -> bytes:
         raise ValidationError(f"Invalid hexadecimal format in TR-31 block: {str(e)}")
 
     try:
-        tr31 = tr31_module.TR31(tr31_bytes)
-        bdk = tr31.decrypt_key_block(kek)
+        tr31 = KeyBlock(tr31_bytes)
+        bdk = tr31.unwrap(kek)
         return bdk
     except Exception as e:
         error_msg = str(e).lower()
@@ -290,7 +290,7 @@ def generate_and_export_pek(kek: bytes) -> tuple:
     if len(kek) != 32:
         raise ValidationError(f"KEK must be 32 bytes, got {len(kek)}")
 
-    if not tr31_module:
+    if not KeyBlock:
         raise SecurityError("psec library not available. Install: pip install psec")
 
     try:
@@ -299,16 +299,16 @@ def generate_and_export_pek(kek: bytes) -> tuple:
         pek_kcv = compute_kcv(pek)
 
         try:
-            tr31 = tr31_module.TR31(
+            # psec utiliza nombres de parámetros específicos del estándar
+            tr31 = KeyBlock(
                 key_data=pek,
-                key_usage="PE",
-                key_algorithm="TDES",
-                key_mode_of_use="E",
-                key_export_restrictions="N",
-                key_version_number="0",
+                key_usage="PE",                 # PIN Encryption
+                key_algorithm="T",              # 'T' es el código para Triple DES en TR-31
+                key_mode_of_use="E",            # Encryption/Decryption
+                exportability="N",              # Non-exportable
             )
 
-            keyblock_bytes = tr31.encrypt_key_block(kek)
+            keyblock_bytes = tr31.wrap(kek)
             tr31_keyblock_hex = keyblock_bytes.hex().upper()
 
             return tr31_keyblock_hex, pek_kcv
