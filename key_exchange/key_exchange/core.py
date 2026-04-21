@@ -7,9 +7,9 @@ from cryptography.hazmat.primitives.ciphers import algorithms, Cipher, modes
 from cryptography.hazmat.backends import default_backend
 
 try:
-    import psec
+    from psec import tr31 as tr31_module
 except ImportError:
-    psec = None
+    tr31_module = None
 
 try:
     import dukpt as dukpt_lib
@@ -162,7 +162,7 @@ def unwrap_bdk(tr31_block: str, kek: bytes) -> bytes:
         ValidationError: If TR-31 format is invalid or KEK is invalid
         SecurityError: If unwrapping fails (integrity check, etc.)
     """
-    if not psec:
+    if not tr31_module:
         raise SecurityError("psec library not available. Install: pip install psec")
 
     if not isinstance(kek, bytes):
@@ -180,7 +180,7 @@ def unwrap_bdk(tr31_block: str, kek: bytes) -> bytes:
         raise ValidationError(f"Invalid hexadecimal format in TR-31 block: {str(e)}")
 
     try:
-        tr31 = psec.TR31(tr31_bytes)
+        tr31 = tr31_module.TR31(tr31_bytes)
         bdk = tr31.decrypt_key_block(kek)
         return bdk
     except Exception as e:
@@ -290,7 +290,7 @@ def generate_and_export_pek(kek: bytes) -> tuple:
     if len(kek) != 32:
         raise ValidationError(f"KEK must be 32 bytes, got {len(kek)}")
 
-    if not psec:
+    if not tr31_module:
         raise SecurityError("psec library not available. Install: pip install psec")
 
     try:
@@ -299,7 +299,7 @@ def generate_and_export_pek(kek: bytes) -> tuple:
         pek_kcv = compute_kcv(pek)
 
         try:
-            tr31 = psec.TR31(
+            tr31 = tr31_module.TR31(
                 key_data=pek,
                 key_usage="PE",
                 key_algorithm="TDES",
