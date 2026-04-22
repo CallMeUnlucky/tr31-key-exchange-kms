@@ -1,0 +1,9 @@
+﻿.venv/
+venv/
+**/__pycache__/
+*.pyc
+*.tr31
+**/Notas_.txt
+EJEMPLOS_USO.md
+REFACTORING.md
+RESUMEN_EJECUTIVO.md
